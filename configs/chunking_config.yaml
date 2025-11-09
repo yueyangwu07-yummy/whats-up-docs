@@ -1,0 +1,12 @@
+model_dir: models/t5_base_full
+data_path: data/train.csv
+val_ratio: 0.1
+seed: 42
+chunk_size: 400
+chunk_overlap: 100
+max_input_length: 512
+max_target_length: 150
+generation_max_length: 150
+eval_sample_limit:
+output_path: experiments/t5_base_chunking_results.json
+

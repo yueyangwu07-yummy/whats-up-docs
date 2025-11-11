@@ -32,6 +32,8 @@ early_stopping_threshold: 0.0
 dataloader_num_workers: 2
 label_smoothing_factor: 0.0
 report_to: []
+warmup_steps: 0
+warmup_ratio: 0.0
 
 
 

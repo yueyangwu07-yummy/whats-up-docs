@@ -1,20 +1,23 @@
 import argparse
 import json
 import logging
+import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 import yaml
 from datasets import Dataset
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from rouge_score import rouge_scorer, scoring
 from sklearn.model_selection import train_test_split
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
     DataCollatorForSeq2Seq,
     EarlyStoppingCallback,
     Seq2SeqTrainer,
@@ -37,6 +40,14 @@ def load_config(config_path: Path) -> Dict[str, Any]:
         return yaml.safe_load(handle)
 
 
+def clean_text(text: Any) -> str:
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    text = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
 def load_data(
     train_path: Path,
     seed: int,
@@ -46,6 +57,11 @@ def load_data(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     full_df = pd.read_csv(train_path)
     LOGGER.info("Loaded %d training rows", len(full_df))
+
+    if "text" in full_df.columns:
+        full_df["text"] = full_df["text"].apply(clean_text)
+    if "summary" in full_df.columns:
+        full_df["summary"] = full_df["summary"].apply(clean_text)
 
     if train_subset_size is not None:
         train_subset = full_df.sample(
@@ -99,16 +115,32 @@ def prepare_dataset(df: pd.DataFrame, text_column: str, summary_column: Optional
     )
 
 
+def create_academic_prompt(text: str) -> str:
+    return (
+        "Summarize the following academic research paper. Focus on:\n"
+        "Main research question or objective\n"
+        "Methodology used\n"
+        "Key findings\n"
+        "Conclusions and implications\n\n"
+        f"Paper content:\n{text}\n\nSummary:"
+    )
+
+
 def tokenize_builder(
     tokenizer: AutoTokenizer,
     max_input_length: int,
     max_target_length: Optional[int],
     use_global_attention: bool,
     padding: str,
+    prompt_fn: Optional[Callable[[str], str]] = None,
 ):
     def preprocess_function(examples: Dict[str, Any]) -> Dict[str, Any]:
+        inputs = examples["text"]
+        if prompt_fn is not None:
+            inputs = [prompt_fn(text) for text in inputs]
+
         model_inputs = tokenizer(
-            examples["text"],
+            inputs,
             max_length=max_input_length,
             truncation=True,
             padding=padding,
@@ -177,6 +209,17 @@ def cleanup_checkpoints(output_dir: Path):
             shutil.rmtree(path, ignore_errors=True)
 
 
+def empty_cuda_cache():
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def resolve_learning_rate(config: Dict[str, Any], use_lora: bool) -> float:
+    if "learning_rate" in config and config["learning_rate"] is not None:
+        return float(config["learning_rate"])
+    return 5e-4 if use_lora else 3e-5
+
+
 def main(config_path: Path):
     config = load_config(config_path)
 
@@ -236,7 +279,31 @@ def main(config_path: Path):
         tokenizer.pad_token = tokenizer.eos_token
 
     tokenizer.model_max_length = config.get("max_input_length", tokenizer.model_max_length)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_source)
+
+    use_quantization = bool(config.get("use_quantization", False))
+    quant_config = None
+    if use_quantization:
+        LOGGER.info("Initializing 4-bit quantization with BitsAndBytesConfig")
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+
+    model_load_kwargs: Dict[str, Any] = {}
+    if quant_config is not None:
+        model_load_kwargs["quantization_config"] = quant_config
+        model_load_kwargs["device_map"] = config.get("device_map", "auto")
+    torch_dtype = config.get("torch_dtype")
+    if torch_dtype is not None:
+        dtype = getattr(torch, str(torch_dtype))
+        model_load_kwargs["torch_dtype"] = dtype
+    try:
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_source, **model_load_kwargs)
+    except Exception as exc:
+        LOGGER.exception("Failed to load model %s: %s", model_source, exc)
+        empty_cuda_cache()
+        raise
 
     max_input_length = config.get("max_input_length", 16384)
     max_target_length = config.get("max_target_length", 256)
@@ -244,12 +311,19 @@ def main(config_path: Path):
     padding = config.get("tokenizer_padding", "longest")
     use_global_attention = config.get("use_global_attention", True)
 
+    prompt_style = config.get("prompt_style", "none")
+    prompt_fn: Optional[Callable[[str], str]] = None
+    if prompt_style == "academic":
+        LOGGER.info("Using academic prompt for inputs")
+        prompt_fn = create_academic_prompt
+
     preprocess_train = tokenize_builder(
         tokenizer=tokenizer,
         max_input_length=max_input_length,
         max_target_length=max_target_length,
         use_global_attention=use_global_attention,
         padding=padding,
+        prompt_fn=prompt_fn,
     )
 
     tokenized_train = None
@@ -275,9 +349,40 @@ def main(config_path: Path):
 
     batch_size = config.get("batch_size", 1)
     eval_batch_size = config.get("eval_batch_size", batch_size)
-    gradient_accumulation_steps = config.get("gradient_accumulation_steps", 4)
-    warmup_ratio = config.get("warmup_ratio")
+    gradient_accumulation_steps = config.get("gradient_accumulation_steps", 16)
+    warmup_ratio = config.get("warmup_ratio", 0.1)
     warmup_steps = config.get("warmup_steps")
+    epochs = config.get("epochs", 5)
+    lr_scheduler_type = config.get("lr_scheduler_type", "cosine")
+
+    use_lora = bool(config.get("use_lora", False))
+    learning_rate = resolve_learning_rate(config, use_lora=use_lora)
+
+    if use_quantization or use_lora:
+        LOGGER.info("Preparing model for parameter-efficient fine-tuning")
+        model = prepare_model_for_kbit_training(model)
+
+    if use_lora:
+        LOGGER.info("Enabling LoRA with r=%s alpha=%s", config.get("lora_r", 16), config.get("lora_alpha", 32))
+        lora_config = LoraConfig(
+            r=int(config.get("lora_r", 16)),
+            lora_alpha=int(config.get("lora_alpha", 32)),
+            target_modules=config.get(
+                "lora_target_modules",
+                ["q_proj", "v_proj", "k_proj", "o_proj"],
+            ),
+            lora_dropout=float(config.get("lora_dropout", 0.05)),
+            bias=config.get("lora_bias", "none"),
+            task_type="SEQ_2_SEQ_LM",
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+
+    if config.get("gradient_checkpointing", False):
+        LOGGER.info("Enabling gradient checkpointing")
+        model.gradient_checkpointing_enable()
+        if hasattr(model.config, "use_cache"):
+            model.config.use_cache = False
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir),
@@ -285,27 +390,28 @@ def main(config_path: Path):
         save_strategy="epoch" if do_train else "no",
         logging_strategy="steps",
         logging_steps=config.get("logging_steps", 50),
-        learning_rate=config.get("learning_rate", 3e-5),
+        learning_rate=learning_rate,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=eval_batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
         weight_decay=config.get("weight_decay", 0.01),
-        num_train_epochs=config.get("epochs", 3),
+        num_train_epochs=epochs,
         predict_with_generate=do_eval or do_predict,
         generation_max_length=generation_max_length,
         generation_num_beams=config.get("num_beams", 4),
         fp16=config.get("fp16", torch.cuda.is_available()),
         save_total_limit=config.get("save_total_limit", 1),
         load_best_model_at_end=do_train and do_eval,
-        metric_for_best_model="eval_rougeL",
+        metric_for_best_model="eval_rouge2",
         greater_is_better=True,
-        lr_scheduler_type=config.get("lr_scheduler_type", "linear"),
+        lr_scheduler_type=lr_scheduler_type,
         seed=seed,
         warmup_ratio=warmup_ratio,
         warmup_steps=warmup_steps,
         label_smoothing_factor=config.get("label_smoothing_factor", 0.0),
         dataloader_num_workers=config.get("dataloader_num_workers", 2),
         report_to=config.get("report_to", []),
+        gradient_checkpointing=config.get("gradient_checkpointing", False),
     )
 
     data_collator = DataCollatorForSeq2Seq(
@@ -318,7 +424,7 @@ def main(config_path: Path):
 
     callbacks = []
     if do_train and do_eval:
-        early_stopping_patience = config.get("early_stopping_patience", 2)
+        early_stopping_patience = config.get("early_stopping_patience", 3)
         early_stopping_threshold = config.get("early_stopping_threshold", 0.0)
         callbacks.append(
             EarlyStoppingCallback(
@@ -363,23 +469,27 @@ def main(config_path: Path):
         trainer.log_metrics("train", train_metrics)
         trainer.save_metrics("train", train_metrics)
         trainer.save_state()
+        empty_cuda_cache()
 
         if do_eval and tokenized_eval is not None:
             LOGGER.info("Evaluating best checkpoint")
             eval_metrics = trainer.evaluate()
             trainer.log_metrics("eval", eval_metrics)
             trainer.save_metrics("eval", eval_metrics)
+            empty_cuda_cache()
 
         LOGGER.info("Saving model to %s", output_dir)
         trainer.save_model(output_dir)
         tokenizer.save_pretrained(output_dir)
         if cleanup_after_training:
             cleanup_checkpoints(output_dir)
+        empty_cuda_cache()
     elif do_eval and tokenized_eval is not None:
         LOGGER.info("Running evaluation")
         eval_metrics = trainer.evaluate()
         trainer.log_metrics("eval", eval_metrics)
         trainer.save_metrics("eval", eval_metrics)
+        empty_cuda_cache()
 
     results_payload: Dict[str, Any] = {}
     if train_metrics is not None:
@@ -399,6 +509,8 @@ def main(config_path: Path):
 
     LOGGER.info("Preparing test dataset")
     test_df = pd.read_csv(test_path)
+    if "text" in test_df.columns:
+        test_df["text"] = test_df["text"].apply(clean_text)
     paper_ids = test_df["paper_id"].tolist()
     test_dataset = prepare_dataset(test_df, text_column="text")
 
@@ -408,6 +520,7 @@ def main(config_path: Path):
         max_target_length=None,
         use_global_attention=use_global_attention,
         padding=padding,
+        prompt_fn=prompt_fn,
     )
 
     tokenized_test = test_dataset.map(
@@ -438,6 +551,7 @@ def main(config_path: Path):
     )
     submission_df.to_csv(submission_path, index=False)
     LOGGER.info("Saved submission file to %s", submission_path)
+    empty_cuda_cache()
 
 
 if __name__ == "__main__":

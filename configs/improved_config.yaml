@@ -1,0 +1,32 @@
+model_name: allenai/led-base-16384
+output_dir: models/improved_led
+use_quantization: true
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+lora_target_modules:
+  - q_proj
+  - v_proj
+  - k_proj
+  - o_proj
+prompt_style: academic
+batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-4
+epochs: 5
+max_input_length: 8192
+max_target_length: 256
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+gradient_checkpointing: true
+num_beams: 4
+early_stopping_patience: 3
+val_ratio: 0.1
+do_train: true
+do_eval: true
+do_predict: true
+cleanup_checkpoints: true
+seed: 42
+tokenizer_padding: longest
+use_global_attention: true
+

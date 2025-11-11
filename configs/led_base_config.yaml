@@ -21,3 +21,11 @@ save_total_limit: 2
 lr_scheduler_type: linear
 use_global_attention: true
 
+# ---- Inference mode (Prediction only) ----
+do_train: false
+do_eval: false
+do_predict: true
+predict_with_generate: true
+TOKENIZERS_PARALLELISM: false
+
+

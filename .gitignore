@@ -1,5 +1,7 @@
 ﻿models/
 checkpoints/
 outputs/
-data/.cache/.hf_cache/.venv/
+.cache/
+.hf_cache/
+.venv/
 

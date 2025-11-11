@@ -1,0 +1,19 @@
+model_name: models/led_base_full
+output_dir: outputs/led_base_inference
+data_dir: data
+test_filename: test_features.csv
+batch_size: 1
+eval_batch_size: 1
+max_input_length: 4096
+max_target_length: 256
+generation_max_length: 256
+tokenizer_padding: longest
+use_global_attention: true
+num_beams: 4
+seed: 42
+do_train: false
+do_eval: false
+do_predict: true
+cleanup_checkpoints: false
+resume_from_checkpoint: false
+

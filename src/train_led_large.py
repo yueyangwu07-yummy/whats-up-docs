@@ -21,6 +21,7 @@ from transformers import (
     Seq2SeqTrainingArguments,
     set_seed,
 )
+from transformers.trainer_utils import get_last_checkpoint
 
 
 LOGGER = logging.getLogger(__name__)
@@ -179,6 +180,11 @@ def cleanup_checkpoints(output_dir: Path):
 def main(config_path: Path):
     config = load_config(config_path)
 
+    do_train = bool(config.get("do_train", True))
+    do_eval = bool(config.get("do_eval", do_train))
+    do_predict = bool(config.get("do_predict", True))
+    cleanup_after_training = bool(config.get("cleanup_checkpoints", True))
+
     data_dir = Path(config.get("data_dir", "data"))
     train_path = data_dir / config.get("train_filename", "train.csv")
     test_path = data_dir / config.get("test_filename", "test_features.csv")
@@ -187,8 +193,10 @@ def main(config_path: Path):
     submission_path = Path(config.get("submission_path", "submission.csv"))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    if do_train or do_eval:
+        results_path.parent.mkdir(parents=True, exist_ok=True)
+    if do_predict:
+        submission_path.parent.mkdir(parents=True, exist_ok=True)
 
     seed = config.get("seed", 42)
     set_seed(seed)
@@ -208,30 +216,33 @@ def main(config_path: Path):
         except ValueError:
             val_ratio = None
 
-    train_df, eval_df = load_data(
-        train_path=train_path,
-        seed=seed,
-        train_subset_size=train_subset_size,
-        eval_subset_size=eval_subset_size,
-        val_ratio=val_ratio,
-    )
+    train_df: Optional[pd.DataFrame] = None
+    eval_df: Optional[pd.DataFrame] = None
+    if do_train or do_eval:
+        train_df, eval_df = load_data(
+            train_path=train_path,
+            seed=seed,
+            train_subset_size=train_subset_size,
+            eval_subset_size=eval_subset_size,
+            val_ratio=val_ratio,
+        )
 
-    model_name = config.get("model_name", "allenai/led-large-16384")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model_source = config.get("model_name", "allenai/led-large-16384")
+    if not do_train:
+        model_source = config.get("model_dir", model_source)
+
+    tokenizer = AutoTokenizer.from_pretrained(model_source)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     tokenizer.model_max_length = config.get("max_input_length", tokenizer.model_max_length)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_source)
 
     max_input_length = config.get("max_input_length", 16384)
     max_target_length = config.get("max_target_length", 256)
     generation_max_length = config.get("generation_max_length", max_target_length)
     padding = config.get("tokenizer_padding", "longest")
     use_global_attention = config.get("use_global_attention", True)
-
-    train_dataset = prepare_dataset(train_df, text_column="text", summary_column="summary")
-    eval_dataset = prepare_dataset(eval_df, text_column="text", summary_column="summary")
 
     preprocess_train = tokenize_builder(
         tokenizer=tokenizer,
@@ -241,19 +252,26 @@ def main(config_path: Path):
         padding=padding,
     )
 
-    tokenized_train = train_dataset.map(
-        preprocess_train,
-        batched=True,
-        remove_columns=train_dataset.column_names,
-        desc="Tokenizing train set",
-    )
+    tokenized_train = None
+    tokenized_eval = None
 
-    tokenized_eval = eval_dataset.map(
-        preprocess_train,
-        batched=True,
-        remove_columns=eval_dataset.column_names,
-        desc="Tokenizing validation set",
-    )
+    if do_train and train_df is not None:
+        train_dataset = prepare_dataset(train_df, text_column="text", summary_column="summary")
+        tokenized_train = train_dataset.map(
+            preprocess_train,
+            batched=True,
+            remove_columns=train_dataset.column_names,
+            desc="Tokenizing train set",
+        )
+
+    if do_eval and eval_df is not None and not eval_df.empty:
+        eval_dataset = prepare_dataset(eval_df, text_column="text", summary_column="summary")
+        tokenized_eval = eval_dataset.map(
+            preprocess_train,
+            batched=True,
+            remove_columns=eval_dataset.column_names,
+            desc="Tokenizing validation set",
+        )
 
     batch_size = config.get("batch_size", 1)
     eval_batch_size = config.get("eval_batch_size", batch_size)
@@ -263,8 +281,8 @@ def main(config_path: Path):
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir),
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
+        evaluation_strategy="epoch" if do_eval else "no",
+        save_strategy="epoch" if do_train else "no",
         logging_strategy="steps",
         logging_steps=config.get("logging_steps", 50),
         learning_rate=config.get("learning_rate", 3e-5),
@@ -273,12 +291,12 @@ def main(config_path: Path):
         gradient_accumulation_steps=gradient_accumulation_steps,
         weight_decay=config.get("weight_decay", 0.01),
         num_train_epochs=config.get("epochs", 3),
-        predict_with_generate=True,
+        predict_with_generate=do_eval or do_predict,
         generation_max_length=generation_max_length,
         generation_num_beams=config.get("num_beams", 4),
         fp16=config.get("fp16", torch.cuda.is_available()),
-        save_total_limit=1,
-        load_best_model_at_end=True,
+        save_total_limit=config.get("save_total_limit", 1),
+        load_best_model_at_end=do_train and do_eval,
         metric_for_best_model="eval_rougeL",
         greater_is_better=True,
         lr_scheduler_type=config.get("lr_scheduler_type", "linear"),
@@ -296,17 +314,18 @@ def main(config_path: Path):
         label_pad_token_id=-100,
     )
 
-    compute_metrics = build_rouge_metric(tokenizer)
+    compute_metrics = build_rouge_metric(tokenizer) if do_eval else None
 
-    early_stopping_patience = config.get("early_stopping_patience", 2)
-    early_stopping_threshold = config.get("early_stopping_threshold", 0.0)
-
-    callbacks = [
-        EarlyStoppingCallback(
-            early_stopping_patience=early_stopping_patience,
-            early_stopping_threshold=early_stopping_threshold,
+    callbacks = []
+    if do_train and do_eval:
+        early_stopping_patience = config.get("early_stopping_patience", 2)
+        early_stopping_threshold = config.get("early_stopping_threshold", 0.0)
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=early_stopping_patience,
+                early_stopping_threshold=early_stopping_threshold,
+            )
         )
-    ]
 
     trainer = Seq2SeqTrainer(
         model=model,
@@ -319,32 +338,64 @@ def main(config_path: Path):
         callbacks=callbacks,
     )
 
-    LOGGER.info("Starting LED training with %s", model_name)
-    train_result = trainer.train()
-    train_metrics = train_result.metrics
-    trainer.log_metrics("train", train_metrics)
-    trainer.save_metrics("train", train_metrics)
-    trainer.save_state()
+    train_metrics = None
+    eval_metrics = None
 
-    LOGGER.info("Evaluating best checkpoint")
-    eval_metrics = trainer.evaluate()
-    trainer.log_metrics("eval", eval_metrics)
-    trainer.save_metrics("eval", eval_metrics)
+    resume_option = config.get("resume_from_checkpoint", True)
+    resume_path: Optional[str] = None
+    if do_train and resume_option:
+        if isinstance(resume_option, str) and Path(resume_option).expanduser().exists():
+            resume_path = str(Path(resume_option).expanduser())
+        else:
+            try:
+                resume_path = get_last_checkpoint(str(output_dir))
+            except OSError:
+                resume_path = None
+        if resume_path:
+            LOGGER.info("Resuming training from checkpoint %s", resume_path)
+        else:
+            LOGGER.info("No checkpoint found in %s. Starting from scratch.", output_dir)
 
-    LOGGER.info("Saving best model to %s", output_dir)
-    trainer.save_model(output_dir)
-    tokenizer.save_pretrained(output_dir)
-    cleanup_checkpoints(output_dir)
+    if do_train:
+        LOGGER.info("Starting LED training with %s", model_source)
+        train_result = trainer.train(resume_from_checkpoint=resume_path)
+        train_metrics = train_result.metrics
+        trainer.log_metrics("train", train_metrics)
+        trainer.save_metrics("train", train_metrics)
+        trainer.save_state()
 
-    results_payload = {
-        "train_metrics": train_metrics,
-        "eval_metrics": eval_metrics,
-        "best_checkpoint": trainer.state.best_model_checkpoint,
-    }
+        if do_eval and tokenized_eval is not None:
+            LOGGER.info("Evaluating best checkpoint")
+            eval_metrics = trainer.evaluate()
+            trainer.log_metrics("eval", eval_metrics)
+            trainer.save_metrics("eval", eval_metrics)
 
-    with results_path.open("w", encoding="utf-8") as handle:
-        json.dump(results_payload, handle, indent=2)
-        LOGGER.info("Saved final metrics to %s", results_path)
+        LOGGER.info("Saving model to %s", output_dir)
+        trainer.save_model(output_dir)
+        tokenizer.save_pretrained(output_dir)
+        if cleanup_after_training:
+            cleanup_checkpoints(output_dir)
+    elif do_eval and tokenized_eval is not None:
+        LOGGER.info("Running evaluation")
+        eval_metrics = trainer.evaluate()
+        trainer.log_metrics("eval", eval_metrics)
+        trainer.save_metrics("eval", eval_metrics)
+
+    results_payload: Dict[str, Any] = {}
+    if train_metrics is not None:
+        results_payload["train_metrics"] = train_metrics
+    if eval_metrics is not None:
+        results_payload["eval_metrics"] = eval_metrics
+    if do_train and trainer.state.best_model_checkpoint:
+        results_payload["best_checkpoint"] = trainer.state.best_model_checkpoint
+
+    if results_payload:
+        with results_path.open("w", encoding="utf-8") as handle:
+            json.dump(results_payload, handle, indent=2)
+            LOGGER.info("Saved metrics to %s", results_path)
+
+    if not do_predict:
+        return
 
     LOGGER.info("Preparing test dataset")
     test_df = pd.read_csv(test_path)

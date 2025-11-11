@@ -537,11 +537,16 @@ def main(config_path: Path):
         num_beams=config.get("num_beams", 4),
     )
 
-    decoded_predictions = tokenizer.batch_decode(
-        predictions.predictions,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=True,
-    )
+    decoded_predictions = []
+    for pred in predictions.predictions:
+        try:
+            pred_clean = pred[pred >= 0]
+            pred_clean = pred_clean[pred_clean < len(tokenizer)]
+            text = tokenizer.decode(pred_clean, skip_special_tokens=True)
+            decoded_predictions.append(text.strip())
+        except Exception as e:
+            print(f"Warning: {e}")
+            decoded_predictions.append("")
 
     submission_df = pd.DataFrame(
         {

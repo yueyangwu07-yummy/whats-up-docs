@@ -11,7 +11,15 @@ import torch
 from rouge_score import rouge_scorer
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, BitsAndBytesConfig
 
-from train_led_large import clean_text, create_academic_prompt, load_config
+from train_led_large import (
+    clean_text,
+    create_academic_prompt,
+    create_academic_prompt_structured,
+    create_academic_prompt_concise,
+    create_academic_prompt_detailed,
+    select_prompt_by_length,
+    load_config,
+)
 
 try:
     from peft import AutoPeftModelForSeq2SeqLM
@@ -32,15 +40,31 @@ def empty_cuda_cache() -> None:
 
 
 def resolve_prompt_fn(prompt_style: str):
-    if prompt_style == "academic":
-        return create_academic_prompt
-    if prompt_style == "concise":
-        return lambda text: (
-            "Summarize the following paper concisely in 3-4 sentences.\n\n"
-            f"{text}\n\n"
-            "Summary:"
-        )
-    return lambda text: text
+    """
+    Resolve prompt function based on style.
+    
+    Args:
+        prompt_style: Prompt style ("auto", "academic", "structured", "concise", "detailed", "none")
+        
+    Returns:
+        Prompt function
+    """
+    if prompt_style == "auto":
+        # Return a function that selects prompt based on text length
+        def auto_prompt(text: str):
+            selected_fn = select_prompt_by_length(text, prompt_style="auto")
+            return selected_fn(text)
+        return auto_prompt
+    elif prompt_style == "academic":
+        return create_academic_prompt_structured  # Use structured as default for academic
+    elif prompt_style == "structured":
+        return create_academic_prompt_structured
+    elif prompt_style == "concise":
+        return create_academic_prompt_concise
+    elif prompt_style == "detailed":
+        return create_academic_prompt_detailed
+    else:
+        return lambda text: text  # No prompt
 
 
 def build_inputs(

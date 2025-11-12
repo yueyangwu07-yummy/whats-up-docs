@@ -1,0 +1,66 @@
+# Test Configuration - Quick validation only
+# This config uses minimal resources to test if training script works
+
+model_name: allenai/led-large-16384
+output_dir: models/test_run
+results_path: models/test_run/final_metrics.json
+submission_path: submissions/test_submission.csv
+
+data_dir: data
+train_filename: train.csv
+test_filename: test_features.csv
+
+# Use very small subset for testing
+train_subset_size: 10
+eval_subset_size: 5
+val_ratio: null
+
+# Minimal training settings
+batch_size: 1
+eval_batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 2.0e-5
+weight_decay: 0.01
+epochs: 1  # Only 1 epoch for testing
+max_input_length: 4096  # Reduced for faster testing
+max_target_length: 256
+generation_max_length: 256
+num_beams: 2  # Reduced for faster generation
+tokenizer_padding: longest
+use_global_attention: true
+
+# Prompt configuration
+prompt_style: auto
+
+# Disable postprocessing and chunking for test
+use_postprocessing: false
+use_smart_chunking: false
+
+# Training settings
+do_train: true
+do_eval: true
+do_predict: false  # Skip prediction for test
+cleanup_checkpoints: true
+resume_from_checkpoint: false
+
+# Optimization
+use_quantization: false
+use_lora: false
+gradient_checkpointing: false
+fp16: false  # Disable for CPU testing
+
+# Logging
+logging_steps: 1
+save_total_limit: 1
+lr_scheduler_type: linear
+warmup_ratio: 0.0
+warmup_steps: 0
+seed: 42
+dataloader_num_workers: 0  # Single process for test
+report_to: []
+
+# Early stopping
+early_stopping_patience: 1
+early_stopping_threshold: 0.0
+
+

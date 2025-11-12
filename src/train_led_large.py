@@ -115,7 +115,17 @@ def prepare_dataset(df: pd.DataFrame, text_column: str, summary_column: Optional
     )
 
 
-def create_academic_prompt(text: str) -> str:
+def create_academic_prompt_structured(text: str) -> str:
+    """
+    Create a structured academic prompt template.
+    Best for medium-length documents (5000-10000 words).
+    
+    Args:
+        text: Input paper text
+        
+    Returns:
+        Formatted prompt string
+    """
     return (
         "Summarize the following academic research paper. Focus on:\n"
         "Main research question or objective\n"
@@ -124,6 +134,103 @@ def create_academic_prompt(text: str) -> str:
         "Conclusions and implications\n\n"
         f"Paper content:\n{text}\n\nSummary:"
     )
+
+
+def create_academic_prompt_concise(text: str) -> str:
+    """
+    Create a concise academic prompt template.
+    Best for short documents (<5000 words).
+    
+    Args:
+        text: Input paper text
+        
+    Returns:
+        Formatted prompt string
+    """
+    return (
+        "Summarize the following academic paper concisely. "
+        "Focus on the main contribution and key results.\n\n"
+        f"{text}\n\n"
+        "Summary:"
+    )
+
+
+def create_academic_prompt_detailed(text: str) -> str:
+    """
+    Create a detailed academic prompt template.
+    Best for long documents (>10000 words).
+    
+    Args:
+        text: Input paper text
+        
+    Returns:
+        Formatted prompt string
+    """
+    return (
+        "Provide a comprehensive summary of the following academic research paper. "
+        "Include:\n"
+        "1. Research background and motivation\n"
+        "2. Research questions and objectives\n"
+        "3. Methodology and experimental setup\n"
+        "4. Main findings and results\n"
+        "5. Discussion and implications\n"
+        "6. Limitations and future work\n\n"
+        f"Paper content:\n{text}\n\n"
+        "Comprehensive Summary:"
+    )
+
+
+def select_prompt_by_length(text: str, prompt_style: str = "auto") -> Callable[[str], str]:
+    """
+    Select the appropriate prompt function based on document length or style preference.
+    
+    Args:
+        text: Input paper text
+        prompt_style: Prompt style preference. Options:
+            - "auto": Automatically select based on document length
+            - "structured": Use structured prompt (medium documents)
+            - "concise": Use concise prompt (short documents)
+            - "detailed": Use detailed prompt (long documents)
+    
+    Returns:
+        Prompt function to use
+    """
+    if prompt_style == "auto":
+        # Count words (approximate)
+        word_count = len(text.split())
+        
+        if word_count < 5000:
+            LOGGER.debug("Document length: %d words, selecting concise prompt", word_count)
+            return create_academic_prompt_concise
+        elif word_count <= 10000:
+            LOGGER.debug("Document length: %d words, selecting structured prompt", word_count)
+            return create_academic_prompt_structured
+        else:
+            LOGGER.debug("Document length: %d words, selecting detailed prompt", word_count)
+            return create_academic_prompt_detailed
+    elif prompt_style == "structured":
+        return create_academic_prompt_structured
+    elif prompt_style == "concise":
+        return create_academic_prompt_concise
+    elif prompt_style == "detailed":
+        return create_academic_prompt_detailed
+    else:
+        LOGGER.warning("Unknown prompt_style '%s', defaulting to structured", prompt_style)
+        return create_academic_prompt_structured
+
+
+def create_academic_prompt(text: str) -> str:
+    """
+    Legacy function for backward compatibility.
+    Uses structured prompt by default.
+    
+    Args:
+        text: Input paper text
+        
+    Returns:
+        Formatted prompt string
+    """
+    return create_academic_prompt_structured(text)
 
 
 def tokenize_builder(
@@ -313,9 +420,27 @@ def main(config_path: Path):
 
     prompt_style = config.get("prompt_style", "none")
     prompt_fn: Optional[Callable[[str], str]] = None
-    if prompt_style == "academic":
-        LOGGER.info("Using academic prompt for inputs")
-        prompt_fn = create_academic_prompt
+    if prompt_style in ("academic", "auto", "structured", "concise", "detailed"):
+        if prompt_style == "auto":
+            LOGGER.info("Using auto prompt selection based on document length")
+            # Create a wrapper that selects prompt based on text length
+            def auto_prompt_wrapper(text: str) -> str:
+                selected_fn = select_prompt_by_length(text, prompt_style="auto")
+                return selected_fn(text)
+            prompt_fn = auto_prompt_wrapper
+        elif prompt_style == "academic":
+            LOGGER.info("Using academic prompt (structured) for inputs")
+            prompt_fn = create_academic_prompt_structured
+        else:
+            LOGGER.info("Using %s prompt style for inputs", prompt_style)
+            # Get a sample text to determine the function (we'll override in tokenize_builder)
+            prompt_fn = select_prompt_by_length("", prompt_style=prompt_style)
+            # Create wrapper to handle per-text selection
+            if prompt_style in ("structured", "concise", "detailed"):
+                def style_prompt_wrapper(text: str) -> str:
+                    selected_fn = select_prompt_by_length(text, prompt_style=prompt_style)
+                    return selected_fn(text)
+                prompt_fn = style_prompt_wrapper
 
     preprocess_train = tokenize_builder(
         tokenizer=tokenizer,

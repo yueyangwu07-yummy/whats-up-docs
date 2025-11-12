@@ -1,0 +1,211 @@
+# Production Configuration for LED-Large Model
+# Best practices configuration with all optimizations enabled
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+# Model name: Use LED-Large for better performance
+model_name: allenai/led-large-16384
+
+# Output directory for trained model
+output_dir: models/led_large_production
+
+# Results and submission paths
+results_path: models/led_large_production/final_metrics.json
+submission_path: submissions/led_large_production_submission.csv
+
+# ============================================================================
+# Data Configuration
+# ============================================================================
+data_dir: data
+train_filename: train.csv
+test_filename: test_features.csv
+
+# Validation split: Use 10% of training data for validation
+val_ratio: 0.1
+
+# Optional: Limit training/eval size for quick testing
+# Set to null or remove to use full dataset
+train_subset_size: null
+eval_subset_size: null
+
+# ============================================================================
+# Training Hyperparameters
+# ============================================================================
+# Batch size: Set to 1 for large model (memory constraints)
+batch_size: 1
+eval_batch_size: 1
+
+# Gradient accumulation: Accumulate gradients over 16 steps
+# Effective batch size = batch_size * gradient_accumulation_steps = 16
+gradient_accumulation_steps: 16
+
+# Learning rate: Lower learning rate (2e-5) for large models to ensure stability
+learning_rate: 2.0e-5
+
+# Weight decay: L2 regularization
+weight_decay: 0.01
+
+# Number of training epochs
+epochs: 5
+
+# Learning rate scheduler: Cosine annealing for smooth decay
+lr_scheduler_type: cosine
+
+# Warmup: Use 10% of training steps for warmup
+warmup_ratio: 0.1
+warmup_steps: null  # Overrides warmup_ratio if set
+
+# ============================================================================
+# Model Input/Output Configuration
+# ============================================================================
+# Maximum input length: LED-Large supports up to 16384 tokens
+max_input_length: 16384
+
+# Maximum target length: Summary length (average 184 words ≈ 256 tokens)
+max_target_length: 256
+
+# Generation max length: Same as target length for inference
+generation_max_length: 256
+
+# Number of beams for beam search during generation
+num_beams: 4
+
+# Tokenizer padding strategy
+tokenizer_padding: longest
+
+# Use global attention: Enable for LED models to attend to all positions
+use_global_attention: true
+
+# ============================================================================
+# Prompt Configuration
+# ============================================================================
+# Prompt style: Auto-select based on document length
+# Options: "auto", "structured", "concise", "detailed", "academic", "none"
+# - "auto": Automatically select prompt based on document length
+#   - <5000 words: concise
+#   - 5000-10000 words: structured
+#   - >10000 words: detailed
+# - "structured": Structured prompt for medium documents
+# - "concise": Concise prompt for short documents
+# - "detailed": Detailed prompt for long documents
+# - "academic": Legacy structured prompt (backward compatibility)
+# - "none": No prompt (direct text input)
+prompt_style: auto
+
+# ============================================================================
+# Post-processing Configuration
+# ============================================================================
+# Enable post-processing to improve summary quality
+use_postprocessing: true
+
+# Post-processing options
+postprocessing:
+  # Remove duplicate sentences using semantic similarity
+  remove_duplicates: true
+  # Similarity threshold for duplicate detection (0-1)
+  similarity_threshold: 0.85
+  
+  # Adjust summary length to target range
+  adjust_length: true
+  # Target word count range (based on training set average: 184 words)
+  min_words: 150
+  max_words: 220
+  
+  # Ensure coherence between sentences
+  ensure_coherence: true
+
+# ============================================================================
+# Smart Chunking Configuration
+# ============================================================================
+# Enable smart chunking for long documents (>12000 words)
+use_smart_chunking: true
+
+# Chunking options
+chunking:
+  # Word count threshold for chunking
+  chunk_threshold: 12000
+  # Maximum words in chunked output
+  max_words: 8000
+  # Ratio of text to extract from beginning (introduction)
+  intro_ratio: 0.15
+  # Ratio of text to sample from middle section
+  middle_ratio: 0.30
+  # Ratio of text to extract from end (conclusion)
+  conclusion_ratio: 0.20
+  # Sliding window size for context continuity
+  window_size: 3
+
+# ============================================================================
+# Training Settings
+# ============================================================================
+# Enable/disable training, evaluation, prediction
+do_train: true
+do_eval: true
+do_predict: true
+
+# Clean up checkpoints after training to save space
+cleanup_checkpoints: true
+
+# Resume from checkpoint if available
+resume_from_checkpoint: true
+
+# ============================================================================
+# Optimization Settings
+# ============================================================================
+# Use 4-bit quantization to reduce memory usage (optional)
+use_quantization: false
+
+# Use LoRA for parameter-efficient fine-tuning (optional)
+use_lora: false
+
+# LoRA configuration (only used if use_lora: true)
+lora_r: 16
+lora_alpha: 32
+lora_target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+lora_dropout: 0.05
+lora_bias: none
+
+# Gradient checkpointing: Trade compute for memory
+gradient_checkpointing: true
+
+# Mixed precision training: Use FP16 for faster training
+fp16: true
+
+# ============================================================================
+# Logging and Monitoring
+# ============================================================================
+# Logging frequency
+logging_steps: 50
+
+# Save total limit: Keep only the best checkpoint
+save_total_limit: 1
+
+# Early stopping: Stop if no improvement for N epochs
+early_stopping_patience: 3
+early_stopping_threshold: 0.0
+
+# Report to: List of integrations (e.g., ["wandb", "tensorboard"])
+report_to: []
+
+# ============================================================================
+# System Configuration
+# ============================================================================
+# Random seed for reproducibility
+seed: 42
+
+# Number of dataloader workers
+dataloader_num_workers: 2
+
+# Label smoothing factor
+label_smoothing_factor: 0.0
+
+# Device map for multi-GPU (only used with quantization)
+device_map: auto
+
+# Torch dtype (optional, e.g., "float16", "bfloat16")
+torch_dtype: null
+
+# Disable tokenizers parallelism warnings
+TOKENIZERS_PARALLELISM: false
+
